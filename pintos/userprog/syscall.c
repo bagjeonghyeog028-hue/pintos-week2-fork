@@ -39,6 +39,21 @@ syscall_init (void) {
 			FLAG_IF | FLAG_TF | FLAG_DF | FLAG_IOPL | FLAG_AC | FLAG_NT);
 }
 
+//파일을 열고 fd테이블과 매핑해주는 함수 구현
+static int sys_open(const char *file)
+{
+	struct file *fl = filesys_open(file);
+	struct thread *t = thread_current();
+	int i = 2;
+
+	if (fl == NULL) return -1;
+	while ((i < 128) && (t->fd_list[i] != NULL)) i++;
+	if (i == 128) return -1;
+
+	t->fd_list[i] = fl;
+	return i;
+}
+
 /* 시스템 콜의 주 진입 인터페이스 */
 void
 syscall_handler (struct intr_frame *f) {
@@ -84,9 +99,9 @@ syscall_handler (struct intr_frame *f) {
 	}
 	
 	case SYS_OPEN:
-		struct file *fl = filesys_open(f->R.rdi);
+		f->R.rax = sys_open((const char *) f->R.rdi);
 		break;
-
+	
 	case SYS_FILESIZE:
 		break;
 
