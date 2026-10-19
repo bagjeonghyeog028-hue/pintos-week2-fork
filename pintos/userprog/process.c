@@ -22,6 +22,7 @@
 #include "vm/vm.h"
 #endif
 
+static bool in_external_intr;
 static void process_cleanup (void);
 static bool load (const char *file_name, struct intr_frame *if_);
 static void initd (void *f_name);
@@ -141,16 +142,14 @@ __do_fork (void *aux) {
 	if (!pml4_for_each (parent->pml4, duplicate_pte, parent))
 		goto error;
 #endif
+	
 
-	/* TODO: 여기에 코드를 작성한다.
-	 * TODO: 힌트: 파일 객체 복제에는 include/filesys/file.h의
-	 * TODO:       file_duplicate를 사용한다. 이 함수가 부모의 자원을
-	 * TODO:       성공적으로 복제했는지 확인하기 전까지
-	 * TODO:       부모는 fork()에서 반환하면 안 된다. */
-
-	process_init ();
-
-	/* 마지막으로 새로 생성한 프로세스로 전환한다. */
+	/* TODO: 여기에 구현한다. file_duplicate()를 사용해 파일 객체를 복제한다. 부모는 자식이 자원을 성공적으로 복제할 때까지 fork()에서 반환하면 안 된다. */
+	if (in_external_intr == false) {
+		process_init ();
+		
+	}
+	/* 마지막으로 새 프로세스로 전환한다. */
 	if (succ)
 		do_iret (&if_);
 error:
@@ -328,6 +327,10 @@ load (const char *file_name, struct intr_frame *if_) {
 	off_t file_ofs;
 	bool success = false;
 	int i;
+	char *cmdline_copy = NULL; // 원래 명령을 복사해 둘 변수 -> 복사를 해서 원본은 보존하기 위해서 있는 복사본의 역할.
+	char *argv[65];            // 나눈 단어를 담을 배열
+	char *save_ptr;            // 다음 단어를 찾을 위치
+	int argc = 0;              // 찾은 단어 수
 
 	/* 페이지 디렉터리를 할당하고 활성화한다. */
 	t->pml4 = pml4_create ();
@@ -335,11 +338,42 @@ load (const char *file_name, struct intr_frame *if_) {
 		goto done;
 	process_activate (thread_current ());
 
-	/* 실행 파일을 연다. */
-	file = filesys_open (file_name);
+	/* strtok_r()는 문자열의 공백을 바꿔 가며 단어를 나눈다.
+   	원본을 보존하고 나눌 수 있도록, 먼저 복사본을 만든다. */
+	cmdline_copy = palloc_get_page(0);
+
+	/* 페이지 할당에 실패했다면 파일 적재를 계속할 수 없으니
+   	기존 정리 경로인 done으로 간다. */
+	if (cmdline_copy == NULL)
+    	goto done;
+
+	/* 복사본에 원래 명령 문자열을 복사한다.
+	PGSIZE는 복사본에 준비된 공간의 크기다. */
+	strlcpy(cmdline_copy, file_name, PGSIZE);
+
+	/* 첫 호출은 단어를 나눌 문자열의 시작 위치부터 읽는다.
+   	반환된 첫 단어의 주소가 argv[0]에 저장된다. */
+	argv[0] = strtok_r(cmdline_copy, " ", &save_ptr);
+
+	/* 현재 칸에 단어가 있고, 허용한 인자 수 안에 있을 때만 반복한다. */
+	while (argc < 64 && argv[argc] != NULL) {
+    argc++;  /* 단어 수++ */
+    argv[argc] = strtok_r(NULL, " ", &save_ptr);  /* 다음 칸에 다음 단어를 받는다. */
+	}
+
+	if (argc == 64 && argv[64] != NULL)                   // 64개보다 많으면
+		goto done;                                       // 처리를 중단한다
+
+
+	/* 인자가 하나도 없으면 실행할 프로그램 이름도 없으므로 중단한다. */
+	if (argc == 0)
+    	goto done;
+
+    /* argv[0]으로 실행 파일을 연 직후, 열기에 실패했는지 확인한다. */
+	file = filesys_open (argv[0]); 
 	if (file == NULL) {
-		printf ("load: %s: open failed\n", file_name);
-		goto done;
+    	printf ("load: %s: open failed\n", argv[0]);
+    	goto done;
 	}
 
 	/* 실행 파일 헤더를 읽고 검증한다. */
@@ -350,7 +384,7 @@ load (const char *file_name, struct intr_frame *if_) {
 			|| ehdr.e_version != 1
 			|| ehdr.e_phentsize != sizeof (struct Phdr)
 			|| ehdr.e_phnum > 1024) {
-		printf ("load: %s: error loading executable\n", file_name);
+		printf ("load: %s: error loading executable\n", argv[0]);  //인자 전달 확인
 		goto done;
 	}
 
@@ -358,7 +392,6 @@ load (const char *file_name, struct intr_frame *if_) {
 	file_ofs = ehdr.e_phoff;
 	for (i = 0; i < ehdr.e_phnum; i++) {
 		struct Phdr phdr;
-
 		if (file_ofs < 0 || file_ofs > file_length (file))
 			goto done;
 		file_seek (file, file_ofs);
@@ -410,44 +443,78 @@ load (const char *file_name, struct intr_frame *if_) {
 	/* 스택을 설정한다. */
 	if (!setup_stack (if_))
 		goto done;
+	
+	uint8_t *sp = (uint8_t *) if_->rsp;
 
-	/* 실행 시작 주소. */
+	for (i = 0; i < argc; i++) {
+    	size_t len = strlen (argv[i]) + 1;
+
+    	sp -= len;
+    	memcpy (sp, argv[i], len);
+    	argv[i] = (char *) sp;
+	}
+	sp = (uint8_t *) ((uintptr_t) sp & ~((uintptr_t) 7));
+
+	/* argv[argc]에 해당하는 NULL 포인터를 먼저 넣는다. */
+	sp -= sizeof (char *);
+	*(char **) sp = NULL;
+
+	/* argv 포인터들을 뒤에서부터 넣는다. */
+	for (i = argc - 1; i >= 0; i--) {
+  	  	sp -= sizeof (char *);
+    	*(char **) sp = argv[i];
+	}
+
+	/* 이제 sp가 argv[0] 포인터의 주소다. */
+	char **user_argv = (char **) sp;
+
+	/* 가짜 반환 주소를 스택에 넣는다. */
+	sp -= sizeof (void *);
+	*(void **) sp = NULL;
+
+	/* 사용자 프로그램에 argc와 argv를 전달한다. */
+	if_->R.rdi = argc;
+	if_->R.rsi = (uint64_t) user_argv;
+
+	/* 완성된 스택 위치를 저장한다. */
+	if_->rsp = sp;
+		
+
+
+	/* 시작 주소를 설정한다. */
 	if_->rip = ehdr.e_entry;
 
-	/* TODO: 여기에 코드를 작성한다.
-	 * TODO: 인자 전달을 구현한다. project2/argument_passing.html을 참고한다. */
 
 	success = true;
 
 done:
-	/* 적재 성공 여부와 관계없이 여기로 온다. */
-	file_close (file);
-	return success;
+    file_close (file);
+    if (cmdline_copy != NULL)
+        palloc_free_page (cmdline_copy);
+    return success;
 }
 
 
-/* PHDR이 FILE 안의 유효하고 적재 가능한 세그먼트를 나타내는지
- * 검사한다. 유효하면 true, 아니면 false를 반환한다. */
+/* PHDR가 유효하게 적재할 수 있는 세그먼트를 나타내는지 검사한다. FILE에서 읽을 수 있으면 true, 아니면 false를 반환한다. */
 static bool
 validate_segment (const struct Phdr *phdr, struct file *file) {
-	/* p_offset과 p_vaddr의 페이지 내부 오프셋은 같아야 한다. */
+	/* p_offset과 p_vaddr의 페이지 내 오프셋이 같아야 한다. */
 	if ((phdr->p_offset & PGMASK) != (phdr->p_vaddr & PGMASK))
 		return false;
 
-	/* p_offset은 FILE 내부를 가리켜야 한다. */
+	/* p_offset이 FILE의 범위 안에 있어야 한다. */
 	if (phdr->p_offset > (uint64_t) file_length (file))
 		return false;
 
-	/* p_memsz는 p_filesz 이상이어야 한다. */
+	/* p_memsz는 p_filesz보다 크거나 같아야 한다. */
 	if (phdr->p_memsz < phdr->p_filesz)
 		return false;
 
-	/* 세그먼트는 비어 있으면 안 된다. */
+	/* 세그먼트가 비어 있으면 안 된다. */
 	if (phdr->p_memsz == 0)
 		return false;
 
-	/* 가상 메모리 영역의 시작과 끝이 모두
-	   사용자 주소 공간 범위 안에 있어야 한다. */
+	/* 가상 메모리 영역의 시작과 끝이 모두 사용자 주소 공간 안에 있어야 한다. */
 	if (!is_user_vaddr ((void *) phdr->p_vaddr))
 		return false;
 	if (!is_user_vaddr ((void *) (phdr->p_vaddr + phdr->p_memsz)))
@@ -500,32 +567,30 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 
 	file_seek (file, ofs);
 	while (read_bytes > 0 || zero_bytes > 0) {
-		/* 이 페이지를 어떻게 채울지 계산한다.
-		 * FILE에서 PAGE_READ_BYTES 바이트를 읽고,
-		 * 나머지 PAGE_ZERO_BYTES 바이트는 0으로 채운다. */
+		/* 이 페이지를 어떻게 채울지 계산한다. FILE에서 PAGE_READ_BYTES를 읽고 나머지 PAGE_ZERO_BYTES를 0으로 채운다. */
 		size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE;
 		size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
-		/* 메모리 페이지를 할당받는다. */
+		/* 메모리 페이지를 가져온다. */
 		uint8_t *kpage = palloc_get_page (PAL_USER);
 		if (kpage == NULL)
 			return false;
 
-		/* 이 페이지에 데이터를 적재한다. */
+		/* 이 페이지를 적재한다. */
 		if (file_read (file, kpage, page_read_bytes) != (int) page_read_bytes) {
 			palloc_free_page (kpage);
 			return false;
 		}
 		memset (kpage + page_read_bytes, 0, page_zero_bytes);
 
-		/* 프로세스의 주소 공간에 페이지를 추가한다. */
+		/* 이 페이지를 프로세스 주소 공간에 추가한다. */
 		if (!install_page (upage, kpage, writable)) {
 			printf("fail\n");
 			palloc_free_page (kpage);
 			return false;
 		}
 
-		/* 다음 페이지로 이동한다. */
+		/* 다음 페이지로 진행한다. */
 		read_bytes -= page_read_bytes;
 		zero_bytes -= page_zero_bytes;
 		upage += PGSIZE;
@@ -533,7 +598,7 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 	return true;
 }
 
-/* USER_STACK에 0으로 채운 페이지를 매핑해 최소한의 스택을 만든다. */
+/* USER_STACK에 0으로 초기화한 페이지를 매핑해 최소 스택을 만든다. */
 static bool
 setup_stack (struct intr_frame *if_) {
 	uint8_t *kpage;
@@ -550,50 +615,26 @@ setup_stack (struct intr_frame *if_) {
 	return success;
 }
 
-/* 사용자 가상 주소 UPAGE에서 커널 가상 주소 KPAGE에 대응하는
- * 페이지로의 매핑을 페이지 테이블에 추가한다.
- * WRITABLE이 true이면 사용자 프로세스가 페이지를 수정할 수 있고,
- * 아니면 읽기 전용이다.
- * UPAGE는 아직 매핑되지 않은 주소여야 한다.
- * KPAGE는 일반적으로 palloc_get_page()로
- * 사용자 풀에서 할당받은 페이지여야 한다.
- * 성공하면 true를 반환한다. UPAGE가 이미 매핑되어 있거나
- * 메모리 할당에 실패하면 false를 반환한다. */
+/* 사용자 가상 주소 UPAGE와 커널 가상 주소 KPAGE를 페이지 테이블에 매핑한다. WRITABLE이 true면 사용자 프로세스가 쓸 수 있고 false면 읽기 전용이다. UPAGE에는 기존 매핑이 없어야 한다. KPAGE는 보통 palloc_get_page()로 사용자 풀에서 할당한 페이지다. 매핑 또는 메모리 할당에 실패하면 false, 성공하면 true를 반환한다. */
 static bool
 install_page (void *upage, void *kpage, bool writable) {
 	struct thread *t = thread_current ();
 
-	/* 해당 가상 주소에 기존 매핑이 없는지 확인한 뒤
-	 * 그 주소에 새 페이지를 매핑한다. */
+	/* 해당 가상 주소에 기존 페이지가 없는지 확인한 뒤 새 페이지를 매핑한다. */
 	return (pml4_get_page (t->pml4, upage) == NULL
 			&& pml4_set_page (t->pml4, upage, kpage, writable));
 }
 #else
-/* 여기부터는 Project 3 이후에 사용하는 코드다.
- * Project 2에서만 사용할 함수를 구현하려면
- * 위쪽 블록에 작성한다. */
+/* 여기부터는 Project 3 이후에 사용하는 코드다. Project 2에서만 함수를 구현하려면 위쪽 블록에 구현한다. */
 
 static bool
 lazy_load_segment (struct page *page, void *aux) {
-	/* TODO: 파일에서 세그먼트를 적재한다. */
+	/* TODO: 파일에서 세그먼트를 읽어 적재한다. */
 	/* TODO: 주소 VA에서 첫 페이지 폴트가 발생할 때 호출된다. */
 	/* TODO: 이 함수를 호출할 때 VA를 사용할 수 있다. */
 }
 
-/* FILE의 오프셋 OFS에서 시작하는 세그먼트를 주소 UPAGE에 적재한다.
- * 총 READ_BYTES + ZERO_BYTES 바이트의 가상 메모리를
- * 다음과 같이 초기화한다.
- *
- * - UPAGE부터 READ_BYTES 바이트는
- *   FILE의 오프셋 OFS에서 읽어온다.
- *
- * - UPAGE + READ_BYTES부터 ZERO_BYTES 바이트는 0으로 채운다.
- *
- * 이 함수가 초기화한 페이지는 WRITABLE이 true이면 사용자 프로세스가
- * 쓸 수 있어야 하며, false이면 읽기 전용이어야 한다.
- *
- * 성공하면 true를 반환한다. 메모리 할당 또는 디스크 읽기에
- * 오류가 발생하면 false를 반환한다. */
+/* FILE의 오프셋 OFS부터 읽은 세그먼트를 UPAGE 주소에 적재한다. 총 READ_BYTES + ZERO_BYTES 바이트를 초기화한다: UPAGE부터 READ_BYTES를 FILE의 OFS에서 읽고, 그 뒤 ZERO_BYTES를 0으로 채운다. WRITABLE이 true면 사용자 프로세스가 해당 페이지에 쓸 수 있고, false면 읽기 전용이다. 메모리 할당 또는 디스크 읽기에 실패하면 false, 성공하면 true를 반환한다. */
 static bool
 load_segment (struct file *file, off_t ofs, uint8_t *upage,
 		uint32_t read_bytes, uint32_t zero_bytes, bool writable) {
@@ -602,19 +643,17 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 	ASSERT (ofs % PGSIZE == 0);
 
 	while (read_bytes > 0 || zero_bytes > 0) {
-		/* 이 페이지를 어떻게 채울지 계산한다.
-		 * FILE에서 PAGE_READ_BYTES 바이트를 읽고,
-		 * 나머지 PAGE_ZERO_BYTES 바이트는 0으로 채운다. */
+		/* 이 페이지를 어떻게 채울지 계산한다. FILE에서 PAGE_READ_BYTES를 읽고 나머지 PAGE_ZERO_BYTES를 0으로 채운다. */
 		size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE;
 		size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
-		/* TODO: lazy_load_segment에 정보를 전달할 aux를 준비한다. */
+		/* lazy_load_segment에 전달할 정보를 담을 aux를 설정한다. */
 		void *aux = NULL;
 		if (!vm_alloc_page_with_initializer (VM_ANON, upage,
 					writable, lazy_load_segment, aux))
 			return false;
 
-		/* 다음 페이지로 이동한다. */
+		/* 다음 페이지로 진행한다. */
 		read_bytes -= page_read_bytes;
 		zero_bytes -= page_zero_bytes;
 		upage += PGSIZE;
@@ -622,17 +661,15 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 	return true;
 }
 
-/* USER_STACK에 스택 페이지 하나를 만든다. 성공하면 true를 반환한다. */
+/* USER_STACK에 페이지를 만들고 성공 여부를 반환한다. */
 static bool
 setup_stack (struct intr_frame *if_) {
 	bool success = false;
 	void *stack_bottom = (void *) (((uint8_t *) USER_STACK) - PGSIZE);
 
-	/* TODO: stack_bottom에 스택을 매핑하고 즉시 페이지를 확보한다.
-	 * TODO: 성공하면 그에 맞게 rsp를 설정한다.
-	 * TODO: 해당 페이지가 스택임을 표시해야 한다. */
-	/* TODO: 여기에 코드를 작성한다. */
+	/* TODO: stack_bottom에 스택 페이지를 매핑하고 즉시 확보한다. 성공하면 rsp를 설정하고 페이지를 스택으로 표시한다. */
+	/* TODO: 여기에 구현한다. */
 
 	return success;
 }
-#endif /* VM */
+#endif /* VM 조건부 코드의 끝. */
