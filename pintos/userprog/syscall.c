@@ -8,6 +8,7 @@
 #include "threads/flags.h"
 #include "intrinsic.h"
 #include "threads/init.h"
+#include "filesys/filesys.h"
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
@@ -46,12 +47,67 @@ syscall_handler (struct intr_frame *f) {
 	switch (input)
 	{
 	case SYS_HALT:
+	{
 		power_off();
+		break;
+	}
+	case SYS_EXIT: //check
+	{
+		struct thread *t = thread_current();
+		t->exit_status = f->R.rdi;
+		thread_exit();
+	}
+
+	case SYS_FORK:
+	{
+
+		break;
+	}
+
+
+	case SYS_EXEC:
+		break;
+	
+	case SYS_WAIT: //check
+		break;
+	
+	case SYS_CREATE:
+	{
+		f->R.rax = filesys_create(f->R.rdi, f->R.rsi);
+		break;
+	}
+
+	case SYS_REMOVE:
+	{
+		f->R.rax = filesys_remove(f->R.rdi);
+		break;
+	}
+	
+	case SYS_OPEN:
+		struct file *fl = filesys_open(f->R.rdi);
+		break;
+
+	case SYS_FILESIZE:
+		break;
+
+	case SYS_READ:
+		break;
+
+	case SYS_WRITE:
+		break;
+
+	case SYS_SEEK:
+		break;
+
+	case SYS_TELL:
+		break;
+
+	case SYS_CLOSE:
 		break;
 	
 	default:
-		break;
+		f->R.rax = -1;
+		return;
 	}
-	printf ("system call!\n");
-	thread_exit ();
+
 }
