@@ -44,14 +44,15 @@ process_create_initd (const char *file_name) {
 	char *fn_copy;
 	tid_t tid;
 
-	/* FILE_NAME의 복사본을 만든다.
-	 * 그렇지 않으면 호출자와 load() 사이에 경쟁 상태가 발생할 수 있다. */
-	fn_copy = palloc_get_page (0);
+	/* Make a copy of FILE_NAME.
+	 * Otherwise there's a race between the caller and load(). */
+	fn_copy = palloc_get_page (0);	/* 파일명 복사본을 저장할 페이지 확보 */
 	if (fn_copy == NULL)
 		return TID_ERROR;
-	strlcpy (fn_copy, file_name, PGSIZE);
+	strlcpy (fn_copy, file_name, PGSIZE);	/* 파일명을 페이지에 저장 */
 
-	/* FILE_NAME을 실행할 새 스레드를 생성한다. */
+	/* Create a new thread to execute FILE_NAME. */
+	/* 실행할 프로세스 생성 */
 	tid = thread_create (file_name, PRI_DEFAULT, initd, fn_copy);
 	if (tid == TID_ERROR)
 		palloc_free_page (fn_copy);
