@@ -159,17 +159,7 @@ validate_user_string(const char *ptr) {
    3. 범위에 포함된 모든 페이지가 매핑되어 있는지 확인한다.
    4. 커널이 버퍼에 쓸 경우 쓰기 권한도 확인한다.
    5. 주소 계산의 오버플로도 고려한다. */
-bool 
-valiadate_user_buffer(void * buffer, size_t size) {
-	if (buffer == NULL)
-		return false;
-	
-	if (size == 0)
-		return false;
-
-	uint8_t *ptr = (uint8_t) buffer;
-	uint8_t *end = ptr + size - 1;
-	
+   
 	/* pg_round_down(ptr);		 현재 포인터가 속한 페이지의 시작 주소
 	   pg_round_down(end);		 버퍼의 끝이 속한 페이지의 시작 주소
 	   pg_round_up(end);   		 버퍼의 끝이 속한 페이지의 다음 주소 */
