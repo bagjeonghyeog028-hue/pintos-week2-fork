@@ -9,6 +9,7 @@
 #include "intrinsic.h"
 #include "threads/init.h"
 #include "filesys/filesys.h"
+#include "userprog/process.h"
 #include "filesys/file.h"
 #include "devices/input.h"
 #include "include/lib/kernel/stdio.h"
@@ -34,6 +35,8 @@ struct lock file_lock;
 #define MSR_STAR 0xc0000081         /* 세그먼트 선택자 MSR */
 #define MSR_LSTAR 0xc0000082        /* 롱 모드 SYSCALL 진입 주소 */
 #define MSR_SYSCALL_MASK 0xc0000084 /* eflags 마스크 */
+
+#define is_user_vaddr(vaddr) (!is_kernel_vaddr((vaddr)))
 
 void
 syscall_init (void) {
@@ -139,6 +142,7 @@ syscall_handler (struct intr_frame *f) {
 	{
 		struct thread *t = thread_current();
 		t->exit_status = f->R.rdi;
+		
 		thread_exit();
 	}
 
@@ -149,9 +153,36 @@ syscall_handler (struct intr_frame *f) {
 		break;
 	}
 
-
 	case SYS_EXEC:
-		break;
+	{	
+		struct thread *t = thread_current ();
+		char *cmdline_copy = NULL; // 원래 명령을 복사해 둘 변수 -> 복사를 해서 원본은 보존하기 위해서 있는 복사본의 역할.
+		char *argv[65];            // 나눈 단어를 담을 배열
+		char *save_ptr;            // 다음 단어를 찾을 위치
+		int argc = 0;              // 찾은 단어 수
+		void *page;
+		{
+			/* data */
+		};
+		page = pml4_get_page(t->pml4,&save_ptr);
+		if (page == NULL)
+			return false;
+		memcpy(page, argv, sizeof(argv));
+	
+		//todo 문자열 전체를 검사
+		if (f->R.rdi == NULL)  {  //주소가 null인지 검사
+			exit(-1);
+		}
+		if (f->R.rdi != NULL || is_user_vaddr((void *) f->R.rdi))  {   //true일시 복사후 전달.
+			char t = f->R.rdi;
+			process_exec(argv);
+			exit(-1);
+		} else {
+		exit(-1);
+		}
+	break;
+	}
+
 	
 	case SYS_WAIT: //check
 		break;
