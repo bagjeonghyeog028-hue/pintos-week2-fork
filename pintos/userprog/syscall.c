@@ -10,9 +10,16 @@
 #include "threads/init.h"
 #include "filesys/filesys.h"
 #include "filesys/file.h"
+#include "devices/input.h"
+#include "include/lib/kernel/stdio.h"
+#include "threads/synch.h"
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
+bool validate_user_string(const char *ptr);
+bool validate_user_buffer (void *buffer, size_t size);
+bool validate_user_addr(void *ptr);
+struct lock file_lock;
 
 /* 시스템 콜.
  *
@@ -33,6 +40,7 @@ syscall_init (void) {
 			((uint64_t)SEL_KCSEG) << 32);
 	write_msr(MSR_LSTAR, (uint64_t) syscall_entry);
 
+	lock_init(&file_lock);
 	/* syscall_entry가 사용자 스택을 커널 모드 스택으로 바꾸기 전까지는
 	 * 인터럽트 서비스 루틴이 인터럽트를 처리하면 안 된다.
 	 * 따라서 FLAG_FL을 마스킹한다. */
@@ -54,6 +62,61 @@ static int sys_open(const char *file)
 	t->fd_list[i] = fl;
 	return i;
 }
+
+static int sys_read(int fd, void *buffer, unsigned size)
+{
+	if (fd < 0 || fd == 1 || fd >= 128) return -1;
+	if (validate_user_buffer(buffer, size) == false)
+	{
+		thread_current()->exit_status = -1;
+		thread_exit();
+	}
+	if (size == 0) return 0;
+
+	if (fd == 0)
+	{
+		uint8_t *buf = buffer;
+		for (int i = 0; i < size; i++)
+			buf[i] = input_getc();
+		return size;
+	}
+
+	struct file *fl = thread_current()->fd_list[fd];
+	if (fl == NULL) return -1;
+
+	lock_acquire(&file_lock);
+	int bytes_read = (int)file_read(fl, buffer, size);
+	lock_release(&file_lock);
+	
+	return bytes_read;
+}
+
+static int sys_write(int fd, void *buffer, unsigned size)
+{
+	if (fd <= 0 || fd >= 128) return -1;
+	if (validate_user_buffer(buffer, size) == false)
+	{
+		thread_current()->exit_status = -1;
+		thread_exit();
+	}
+	if (size == 0) return 0;
+
+	if (fd == 1)
+	{
+		char *buf = buffer;
+		putbuf(buf, (size_t) size);
+		return size;
+	}
+
+	struct file *fl = thread_current()->fd_list[fd];
+	if (fl == NULL) return -1;
+
+	lock_acquire(&file_lock);
+	int bytes_write = (int)file_write(fl, buffer, size);
+	lock_release(&file_lock);
+	return bytes_write;
+}
+
 
 /* 시스템 콜의 주 진입 인터페이스 */
 /* The main system call interface */
@@ -92,18 +155,25 @@ syscall_handler (struct intr_frame *f) {
 		break;
 	
 	case SYS_CREATE:
+		lock_acquire(&file_lock);
 		f->R.rax = filesys_create(f->R.rdi, f->R.rsi);
+		lock_release(&file_lock);
 		break;
 
 	case SYS_REMOVE:
+		lock_acquire(&file_lock);
 		f->R.rax = filesys_remove(f->R.rdi);
+		lock_release(&file_lock);
 		break;
 	
 	case SYS_OPEN:
+		lock_acquire(&file_lock);
 		f->R.rax = sys_open((const char *) f->R.rdi);
+		lock_release(&file_lock);
 		break;
 	
 	case SYS_FILESIZE:
+	{
 		struct file *fl = thread_current()->fd_list[(int)f->R.rdi];
 		if (fl == NULL) 
 		{
@@ -112,21 +182,53 @@ syscall_handler (struct intr_frame *f) {
 		}
 		f->R.rax = file_length(fl);
 		break;
+	}
 
 	case SYS_READ:
+		f->R.rax = sys_read(f->R.rdi, (void *)f->R.rsi, f->R.rdx);
 		break;
 
 	case SYS_WRITE:
+		f->R.rax = sys_write(f->R.rdi, (void *)f->R.rsi, f->R.rdx);
 		break;
 
 	case SYS_SEEK:
+	{
+		struct file *fl = thread_current()->fd_list[(int)f->R.rdi];
+		if (fl == NULL) 
+		{
+			f->R.rax = -1;
+			break;
+		}
+		file_seek(fl, (off_t)f->R.rsi);
 		break;
-
+	}
+		
 	case SYS_TELL:
+	{
+		struct file *fl = thread_current()->fd_list[(int)f->R.rdi];
+		if (fl == NULL) 
+		{
+			f->R.rax = -1;
+			break;
+		}
+		f->R.rax = file_tell(fl);
 		break;
-
+	}
 	case SYS_CLOSE:
+	{
+		struct file *fl = thread_current()->fd_list[(int)f->R.rdi];
+		if (fl == NULL) 
+		{
+			f->R.rax = -1;
+			break;
+		}
+		lock_acquire(&file_lock);
+		file_close(fl);
+		thread_current()->fd_list[(int)f->R.rdi] = NULL;
+		lock_release(&file_lock);
 		break;
+	}
 	
 	default:
 		f->R.rax = -1;
