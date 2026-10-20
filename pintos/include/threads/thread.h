@@ -1,5 +1,6 @@
 #ifndef THREADS_THREAD_H
 #define THREADS_THREAD_H
+#define THREADS_THREAD_H
 
 #include <debug.h>
 #include <list.h>
@@ -103,7 +104,7 @@ struct thread {
 //project2---------------------------------------------
 	//종료 상태 저장(아무것도 안되고 종료되었을때 -1)
 	int exit_status;
-	struct list fd_list;
+	struct file *fd_list[128];	//fd 리스트
 //project2---------------------------------------------
 //mlfqs
 	int nice;                               // 양보 정도 (-20 ~ 20), 정수
